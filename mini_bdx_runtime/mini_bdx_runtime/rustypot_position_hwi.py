@@ -6,7 +6,13 @@ from mini_bdx_runtime.duck_config import DuckConfig
 
 
 class HWI:
-    def __init__(self, duck_config: DuckConfig, usb_port: str = "/dev/ttyACM0"):
+    def __init__(
+        self,
+        duck_config: DuckConfig,
+        usb_port: str = "/dev/ttyACM0",
+        baudrate: int = 1_000_000,
+        timeout: float = 1.0,
+    ):
 
         self.duck_config = duck_config
 
@@ -74,21 +80,48 @@ class HWI:
         self.kds = np.ones(len(self.joints)) * 0  # default kd
         self.low_torque_kps = np.ones(len(self.joints)) * 2
 
-        self.io = rustypot.feetech(usb_port, 1000000)
+        self.io = rustypot.Sts3215PyController(
+            serial_port=usb_port,
+            baudrate=baudrate,
+            timeout=timeout,
+        )
+
+    @property
+    def motor_ids(self):
+        return list(self.joints.values())
+
+    @staticmethod
+    def _gain_values(gains):
+        """Convert NumPy/Python numeric values to RustyPot's u8 register values."""
+        values = [int(gain) for gain in gains]
+        if any(value < 0 or value > 255 for value in values):
+            raise ValueError("Motor gains must be between 0 and 255")
+        return values
 
     def set_kps(self, kps):
-        self.kps = kps
-        self.io.set_kps(list(self.joints.values()), self.kps)
+        self.kps = self._gain_values(kps)
+        self.io.sync_write_p_coefficient(self.motor_ids, self.kps)
 
     def set_kds(self, kds):
-        self.kds = kds
-        self.io.set_kds(list(self.joints.values()), self.kds)
+        self.kds = self._gain_values(kds)
+        self.io.sync_write_d_coefficient(self.motor_ids, self.kds)
 
     def set_kp(self, id, kp):
-        self.io.set_kps([id], [kp])
+        self.io.sync_write_p_coefficient([id], self._gain_values([kp]))
+
+    def set_torque_enabled(self, id, enabled):
+        self.io.sync_write_torque_enable([id], [bool(enabled)])
+
+    def get_motor_position(self, id):
+        return self.io.sync_read_present_position([id])[0]
+
+    def set_motor_position(self, id, position):
+        self.io.sync_write_goal_position([id], [float(position)])
 
     def turn_on(self):
-        self.io.set_kps(list(self.joints.values()), self.low_torque_kps)
+        self.io.sync_write_p_coefficient(
+            self.motor_ids, self._gain_values(self.low_torque_kps)
+        )
         print("turn on : low KPS set")
         time.sleep(1)
 
@@ -97,11 +130,15 @@ class HWI:
 
         time.sleep(1)
 
-        self.io.set_kps(list(self.joints.values()), self.kps)
+        self.io.sync_write_p_coefficient(
+            self.motor_ids, self._gain_values(self.kps)
+        )
         print("turn on : high kps")
 
     def turn_off(self):
-        self.io.disable_torque(list(self.joints.values()))
+        self.io.sync_write_torque_enable(
+            self.motor_ids, [False] * len(self.motor_ids)
+        )
 
     def set_position(self, joint_name, pos):
         """
@@ -109,20 +146,22 @@ class HWI:
         """
         id = self.joints[joint_name]
         pos = pos + self.joints_offsets[joint_name]
-        self.io.write_goal_position([id], [pos])
+        self.io.sync_write_goal_position([id], [float(pos)])
 
     def set_position_all(self, joints_positions):
         """
         joints_positions is a dictionary with joint names as keys and joint positions as values
         Warning: expects radians
         """
-        ids_positions = {
-            self.joints[joint]: position + self.joints_offsets[joint]
+        ids = [self.joints[joint] for joint in joints_positions]
+        positions = [
+            float(position + self.joints_offsets[joint])
             for joint, position in joints_positions.items()
-        }
+        ]
 
-        self.io.write_goal_position(
-            list(self.joints.values()), list(ids_positions.values())
+        self.io.sync_write_goal_position(
+            ids,
+            positions,
         )
 
     def get_present_positions(self, ignore=[]):
@@ -131,9 +170,7 @@ class HWI:
         """
 
         try:
-            present_positions = self.io.read_present_position(
-                list(self.joints.values())
-            )
+            present_positions = self.io.sync_read_present_position(self.motor_ids)
         except Exception as e:
             print(e)
             return None
@@ -150,9 +187,7 @@ class HWI:
         Returns the present velocities in rad/s (default) or rev/min
         """
         try:
-            present_velocities = self.io.read_present_velocity(
-                list(self.joints.values())
-            )
+            present_velocities = self.io.sync_read_present_speed(self.motor_ids)
         except Exception as e:
             print(e)
             return None

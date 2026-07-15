@@ -116,6 +116,9 @@ git checkout v2
 pip install -e .
 ```
 
+This runtime uses `rustypot==1.5.0` and its `Sts3215PyController` API. RustyPot
+1.5.0 requires Python 3.10 or newer.
+
 In Raspberry Pi 5, you need to perform the following operations
 
 ```bash
